@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -135,6 +136,12 @@ func startMetrics(addr string) {
 	}
 }
 
+type Stream struct {
+	SessionID string   `json:"session_id"`
+	NPeers    int      `json:"n_peers"`
+	LivePeers []string `json:"live_peers"`
+}
+
 func main() {
 
 	if !parse() {
@@ -163,6 +170,34 @@ func main() {
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 	}
+
+	http.Handle("/sessions", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions := s.GetSessions()
+		responseSessions := make([]Stream, len(sessions))
+
+		for i, session := range sessions {
+			livePeers := []string{}
+			for _, peer := range session.Peers() {
+				pub := peer.Publisher()
+				if len(pub.Tracks()) > 0 {
+					livePeers = append(livePeers, peer.ID())
+				}
+			}
+
+			responseSessions[i] = Stream{
+				SessionID: session.ID(),
+				NPeers:    len(session.Peers()),
+				LivePeers: livePeers,
+			}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		encoder := json.NewEncoder(w)
+		err := encoder.Encode(responseSessions)
+		if err != nil {
+			logger.Error(err, "error encoding sessions")
+		}
+	}))
 
 	http.Handle("/ws", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := upgrader.Upgrade(w, r, nil)
