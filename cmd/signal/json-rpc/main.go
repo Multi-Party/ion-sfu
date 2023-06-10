@@ -10,12 +10,15 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/ion-sfu/cmd/signal/json-rpc/server"
 	log "github.com/pion/ion-sfu/pkg/logger"
 	"github.com/pion/ion-sfu/pkg/middlewares/datachannel"
 	"github.com/pion/ion-sfu/pkg/sfu"
+	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media/oggwriter"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sourcegraph/jsonrpc2"
 	websocketjsonrpc2 "github.com/sourcegraph/jsonrpc2/websocket"
@@ -172,6 +175,7 @@ func main() {
 		WriteBufferSize: 1024,
 	}
 
+	// Used with the session ID: /session/ID
 	http.Handle("/session/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(path) != 2 {
@@ -209,6 +213,62 @@ func main() {
 		if err != nil {
 			logger.Error(err, "session: error encoding session")
 		}
+	}))
+
+	// Used with the session ID: /record/ID
+	http.Handle("/record/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(path) != 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			logger.Info("session: bad request wrong number of path elements", "path", path)
+			return
+		}
+
+		sessionID := path[1]
+		session, webrtcConfig := s.GetSession(sessionID)
+
+		pub, err := sfu.NewPublisher("recorder", session, &webrtcConfig)
+		if err != nil {
+			logger.Error(err, "record: creating publisher failed")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("failed to start recording"))
+			return
+		}
+
+		pub.OnPublisherTrack(func(track sfu.PublisherTrack) {
+			if track.Track.Kind() != webrtc.RTPCodecTypeAudio {
+				logger.Info("track is not audio", "track", track.Track.ID(), "kind", track.Track.Kind())
+			}
+
+			go func() {
+				oggFile, err := oggwriter.New(
+					fmt.Sprintf(
+						"%s_%s_%s.ogg",
+						sessionID,
+						track.Receiver.TrackID(),
+						time.Now().UTC().Format(time.RFC3339Nano),
+					), 48000, 2)
+				if err != nil {
+					logger.Error(err, "on publisher track: creating audio file failed")
+					return
+				}
+				defer oggFile.Close()
+
+				for {
+					packet, _, err := track.Track.ReadRTP()
+					if err != nil {
+						logger.Error(err, "recording error: reading rtp packet")
+						return
+					}
+
+					err = oggFile.WriteRTP(packet)
+					if err != nil {
+						logger.Error(err, "recording error: writing rtp packet")
+						return
+					}
+				}
+			}()
+		})
 	}))
 
 	http.Handle("/sessions", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
