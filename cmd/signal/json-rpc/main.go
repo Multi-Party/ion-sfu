@@ -9,6 +9,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/ion-sfu/cmd/signal/json-rpc/server"
@@ -171,6 +172,45 @@ func main() {
 		WriteBufferSize: 1024,
 	}
 
+	http.Handle("/session/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(path) != 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			logger.Info("session: bad request wrong number of path elements", "path", path)
+			return
+		}
+
+		sessionID := path[1]
+		session, _ := s.GetSession(sessionID)
+
+		if len(session.Peers()) == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			logger.Info("session: not found", "path", r.URL.Path)
+			return
+		}
+
+		livePeers := []string{}
+		for _, peer := range session.Peers() {
+			pub := peer.Publisher()
+			if len(pub.Tracks()) > 0 {
+				livePeers = append(livePeers, peer.ID())
+			}
+		}
+
+		responseSession := Stream{
+			SessionID: session.ID(),
+			NPeers:    len(session.Peers()),
+			LivePeers: livePeers,
+		}
+
+		w.WriteHeader(http.StatusOK)
+		encoder := json.NewEncoder(w)
+		err := encoder.Encode(responseSession)
+		if err != nil {
+			logger.Error(err, "session: error encoding session")
+		}
+	}))
+
 	http.Handle("/sessions", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessions := s.GetSessions()
 		responseSessions := make([]Stream, len(sessions))
@@ -195,7 +235,7 @@ func main() {
 		encoder := json.NewEncoder(w)
 		err := encoder.Encode(responseSessions)
 		if err != nil {
-			logger.Error(err, "error encoding sessions")
+			logger.Error(err, "sessions: error encoding sessions")
 		}
 	}))
 
