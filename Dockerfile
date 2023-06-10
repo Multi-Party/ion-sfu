@@ -1,10 +1,12 @@
 FROM golang:stretch
 
-WORKDIR $GOPATH/src/github.com/pion/ion-sfu
+WORKDIR /app
 
-COPY go.mod go.sum ./
-RUN cd $GOPATH/src/github.com/pion/ion-sfu && go mod download
+COPY go.mod go.sum /app/
+RUN cd /app && go mod download
 
-COPY sfu/ $GOPATH/src/github.com/pion/ion-sfu/pkg
-COPY cmd/ $GOPATH/src/github.com/pion/ion-sfu/cmd
-COPY config.toml $GOPATH/src/github.com/pion/ion-sfu/config.toml
+COPY config.toml /app/config.toml
+COPY pkg/ /app/pkg
+COPY cmd/ /app/cmd
+
+RUN cd /app && go build -o sfu cmd/signal/json-rpc/main.go
