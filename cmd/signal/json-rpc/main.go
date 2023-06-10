@@ -146,6 +146,41 @@ type Stream struct {
 	LivePeers []string `json:"live_peers"`
 }
 
+type Recording struct {
+	Pub *sfu.Publisher
+}
+
+func startRecording(sessionID string, track *webrtc.TrackRemote) {
+	logger.Info("recording started")
+
+	oggFile, err := oggwriter.New(
+		fmt.Sprintf(
+			"%s_%s_%s.ogg",
+			sessionID,
+			track.ID(),
+			time.Now().UTC().Format(time.RFC3339Nano),
+		), 48000, 2)
+	if err != nil {
+		logger.Error(err, "on publisher track: creating audio file failed")
+		return
+	}
+	defer oggFile.Close()
+
+	for {
+		packet, _, err := track.ReadRTP()
+		if err != nil {
+			logger.Error(err, "recording error: reading rtp packet")
+			return
+		}
+
+		err = oggFile.WriteRTP(packet)
+		if err != nil {
+			logger.Error(err, "recording error: writing rtp packet")
+			return
+		}
+	}
+}
+
 func main() {
 
 	if !parse() {
@@ -215,8 +250,12 @@ func main() {
 		}
 	}))
 
+	recordings := map[string]Recording{}
+
 	// Used with the session ID: /record/ID
 	http.Handle("/record/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("start recording", "path", r.URL.Path)
+
 		path := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(path) != 2 {
 			w.WriteHeader(http.StatusBadRequest)
@@ -227,48 +266,40 @@ func main() {
 		sessionID := path[1]
 		session, webrtcConfig := s.GetSession(sessionID)
 
+		if len(session.Peers()) == 0 {
+			logger.Info("not recording session with 0 peers")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		// peer := sfu.NewPeer(s)
+		// err :=
 		pub, err := sfu.NewPublisher("recorder", session, &webrtcConfig)
 		if err != nil {
 			logger.Error(err, "record: creating publisher failed")
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("failed to start recording"))
 			return
 		}
 
-		pub.OnPublisherTrack(func(track sfu.PublisherTrack) {
-			if track.Track.Kind() != webrtc.RTPCodecTypeAudio {
-				logger.Info("track is not audio", "track", track.Track.ID(), "kind", track.Track.Kind())
+		recordings[sessionID] = Recording{Pub: pub}
+
+		pub.OnPublisherTrack(func(pt sfu.PublisherTrack) {
+			track := pt.Track
+			logger.Info("recorder new track", "track", track.ID(), "kind", track.Kind())
+
+			if track.Kind() != webrtc.RTPCodecTypeAudio {
+				logger.Info("track is not audio", "track", track.ID(), "kind", track.Kind())
 			}
 
-			go func() {
-				oggFile, err := oggwriter.New(
-					fmt.Sprintf(
-						"%s_%s_%s.ogg",
-						sessionID,
-						track.Receiver.TrackID(),
-						time.Now().UTC().Format(time.RFC3339Nano),
-					), 48000, 2)
-				if err != nil {
-					logger.Error(err, "on publisher track: creating audio file failed")
-					return
-				}
-				defer oggFile.Close()
-
-				for {
-					packet, _, err := track.Track.ReadRTP()
-					if err != nil {
-						logger.Error(err, "recording error: reading rtp packet")
-						return
-					}
-
-					err = oggFile.WriteRTP(packet)
-					if err != nil {
-						logger.Error(err, "recording error: writing rtp packet")
-						return
-					}
-				}
-			}()
+			go startRecording(sessionID, track)
 		})
+
+		logger.Info("recording", "tracks", len(pub.Tracks()))
+		for _, track := range pub.Tracks() {
+			go startRecording(sessionID, track)
+		}
+
+		w.WriteHeader(http.StatusOK)
 	}))
 
 	http.Handle("/sessions", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
